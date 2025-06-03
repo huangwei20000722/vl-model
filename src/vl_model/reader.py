@@ -1,15 +1,13 @@
 import base64
-import os
 
-import openai
 from dotenv import find_dotenv, load_dotenv
 
-from client import get_client
+from vl_model.client import get_client
 
 load_dotenv(find_dotenv())
 
 
-class ImageReader(object):
+class MeterImageReader(object):
   """读取图片中的仪表读数，使用的文本的形式返回。"""
 
   def __init__(self, image_path):
@@ -43,8 +41,24 @@ class ImageReader(object):
     return response.choices[0].message.content
 
 
-if __name__ == "__main__":
-  image_list = ["resources/image.jpg", "resources/crop.png", "resources/meter-2.jpg"]
-  for image_path in image_list[-1:]:
-    image_reader = ImageReader(image_path)
+def test_last_one():
+  image_path = "resources/gas-crop.png"
+  image_reader = MeterImageReader(image_path)
+  print(image_reader.read_image())
+
+
+def test_all():
+  image_list = [
+    "resources/image.jpg",
+    "resources/crop.png",
+    "resources/meter-2.jpg",
+    "resources/gas.jpg",
+  ]
+  for image_path in image_list:
+    image_reader = MeterImageReader(image_path)
     print(image_reader.read_image())
+
+
+if __name__ == "__main__":
+  # test_all()
+  test_last_one()
