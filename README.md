@@ -1,0 +1,1 @@
+Run: `uv run src/vl_model/reader.py`
