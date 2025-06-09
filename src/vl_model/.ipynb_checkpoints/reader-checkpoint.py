@@ -1,110 +1,48 @@
-# import base64
-
-# from dotenv import find_dotenv, load_dotenv
-
-# from vl_model.client import get_client
-
-# load_dotenv(find_dotenv())
-
-
-
-# class MeterImageReader(object):
-#   """读取图片中的仪表读数，使用的文本的形式返回。"""
-
-#   def __init__(self, image_path):
-#     self.image_path = image_path
-#     self.client = get_client()
-
-#   def read_image(self):
-#     img_type = self.image_path.split(".")[-1]
-#     with open(self.image_path, "rb") as image_file:
-#       image_data = image_file.read()
-#       base64_image = base64.b64encode(image_data).decode("utf-8")
-
-#     response = self.client.chat.completions.create(
-#       model="Qwen/Qwen2.5-VL-72B-Instruct",
-#       messages=[
-#         {
-#           "role": "system",
-#           "content": "You are a helpful assistant that can read images and extract the meter value.",
-#         },
-#         {
-#           "role": "user",
-#           "content": [
-#             {
-#               "type": "image_url",
-#               "image_url": {"url": f"data:image/{img_type};base64,{base64_image}"},
-#             }
-#           ],
-#         },
-#       ],
-#     )
-#     return response.choices[0].message.content
-
-
-# def test_last_one():
-#   image_path = "resources/gas-crop.png"
-#   image_reader = MeterImageReader(image_path)
-#   print(image_reader.read_image())
-
-
-# def test_all():
-#   image_list = [
-#     "resources/image.jpg",
-#     "resources/crop.png",
-#     "resources/meter-2.jpg",
-#     "resources/gas.jpg",
-#   ]
-#   for image_path in image_list:
-#     image_reader = MeterImageReader(image_path)
-#     print(image_reader.read_image())
-
-
-# if __name__ == "__main__":
-#   # test_all()
-#   test_last_one()
-
-
-
-
+# 基于vl-model用GOT-OCR或者openai api识别resources图像
 
 import base64
+import os
+import argparse
+import torch
+import gc
+import tempfile
 from PIL import Image
 from transformers import AutoModel, AutoTokenizer
-import torch
-import os
 from dotenv import find_dotenv, load_dotenv
-import gc
-import tempfile  # 添加临时文件处理
 
+# 加载环境变量
 load_dotenv(find_dotenv())
 
-# 全局加载模型（单例模式）
-MODEL = None
-TOKENIZER = None
+# 全局模型变量
+GOT_MODEL = None
+GOT_TOKENIZER = None
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-def load_model_once():
-    global MODEL, TOKENIZER
-    if MODEL is None or TOKENIZER is None:
-        TOKENIZER = AutoTokenizer.from_pretrained(
+def load_got_model():
+    """加载GOT-OCR模型（单例模式）"""
+    global GOT_MODEL, GOT_TOKENIZER
+    if GOT_MODEL is None or GOT_TOKENIZER is None:
+        print("正在加载GOT-OCR模型...")
+        GOT_TOKENIZER = AutoTokenizer.from_pretrained(
             'stepfun-ai/GOT-OCR2_0', 
             trust_remote_code=True
         )
-        MODEL = AutoModel.from_pretrained(
+        GOT_MODEL = AutoModel.from_pretrained(
             'stepfun-ai/GOT-OCR2_0',
             trust_remote_code=True,
             low_cpu_mem_usage=True,
             device_map='auto',
             use_safetensors=True,
-            torch_dtype=torch.float16,  # 使用半精度减少显存
-            pad_token_id=TOKENIZER.eos_token_id
+            torch_dtype=torch.float16,
+            pad_token_id=GOT_TOKENIZER.eos_token_id
         ).eval().to(DEVICE)
+        print("GOT-OCR模型加载完成")
 
-class MeterImageReader:
+class GOTMeterImageReader:
+    """使用GOT-OCR模型读取仪表图像"""
     def __init__(self, image_path):
         self.image_path = image_path
-        load_model_once()  # 确保模型只加载一次
+        load_got_model()  # 确保模型已加载
 
     def read_image(self):
         try:
@@ -113,49 +51,105 @@ class MeterImageReader:
             print(f"打开图像文件时出错: {e}")
             return None
         
-        # 创建临时文件（解决模型需要文件路径的问题）
+        # 创建临时文件
         with tempfile.NamedTemporaryFile(suffix='.jpg', delete=True) as temp_file:
             image.save(temp_file.name, format='JPEG')
             
-            # 使用临时文件路径执行 OCR
-            with torch.inference_mode():  # 禁用梯度计算
-                res = MODEL.chat(TOKENIZER, temp_file.name, ocr_type='ocr')
+            # 使用临时文件路径执行OCR
+            with torch.inference_mode():
+                res = GOT_MODEL.chat(GOT_TOKENIZER, temp_file.name, ocr_type='ocr')
         
-        # 显存清理
+        # 清理资源
         torch.cuda.empty_cache()
         gc.collect()
         
         return res
 
-# 测试函数保持不变
-def test_last_one():
-    image_path = "resources/gas-crop.png"
-    image_reader = MeterImageReader(image_path)
-    print(image_reader.read_image())
+class OpenAIMeterImageReader:
+    """使用OpenAI API读取仪表图像"""
+    def __init__(self, image_path):
+        self.image_path = image_path
+        from vl_model.client import get_client  # 延迟导入
+        self.client = get_client()
 
-def test_all():
-    image_list = [
-        "resources/image.jpg",
-        "resources/crop.png",
-        "resources/meter-2.jpg",
-        "resources/gas.jpg",
-    ]
-    for image_path in image_list:
-        print(f"\n处理图像: {image_path}")
-        image_reader = MeterImageReader(image_path)
-        result = image_reader.read_image()
-        print(f"识别结果: {result}")
-        
-        # 显式释放资源
-        del image_reader
-        torch.cuda.empty_cache()
-        gc.collect()
+    def read_image(self):
+        img_type = self.image_path.split(".")[-1]
+        with open(self.image_path, "rb") as image_file:
+            image_data = image_file.read()
+            base64_image = base64.b64encode(image_data).decode("utf-8")
 
-if __name__ == "__main__":
-    # 设置内存分配优化
+        response = self.client.chat.completions.create(
+            model="Qwen/Qwen2.5-VL-72B-Instruct",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that can read images and extract the meter value.",
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/{img_type};base64,{base64_image}"},
+                        },
+                    ],
+                },
+            ],
+        )
+        return response.choices[0].message.content
+
+def main():
+    """主命令行程序"""
+    parser = argparse.ArgumentParser(description='仪表图像读数识别工具')
+    parser.add_argument('image_path', type=str, help='要识别的图像路径')
+    parser.add_argument('--model', type=str, choices=['got', 'openai'], default='got',
+                        help='选择使用的模型: got (本地GOT-OCR) 或 openai (OpenAI API)')
+    parser.add_argument('--test_all', action='store_true', help='测试所有示例图像')
+    
+    args = parser.parse_args()
+    
+    # 设置显存优化
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
     
-    # 选择测试模式
-    test_all()
-    # test_last_one()
+    if args.test_all:
+        test_images = [
+            "resources/image.jpg",
+            "resources/crop.png",
+            "resources/meter-2.jpg",
+            "resources/gas.jpg",
+        ]
+        for img_path in test_images:
+            print(f"\n处理图像: {img_path}")
+            if not os.path.exists(img_path):
+                print(f"文件不存在: {img_path}")
+                continue
+            
+            if args.model == 'got':
+                reader = GOTMeterImageReader(img_path)
+            else:
+                reader = OpenAIMeterImageReader(img_path)
+            
+            result = reader.read_image()
+            print(f"识别结果: {result}")
+            
+            # 清理资源
+            if args.model == 'got':
+                torch.cuda.empty_cache()
+                gc.collect()
+    else:
+        if not os.path.exists(args.image_path):
+            print(f"错误: 文件不存在 - {args.image_path}")
+            return
+        
+        if args.model == 'got':
+            reader = GOTMeterImageReader(args.image_path)
+        else:
+            reader = OpenAIMeterImageReader(args.image_path)
+        
+        result = reader.read_image()
+        print(f"\n图像: {args.image_path}")
+        print(f"模型: {'GOT-OCR' if args.model == 'got' else 'OpenAI'}")
+        print(f"识别结果: {result}")
 
+if __name__ == "__main__":
+    main()
